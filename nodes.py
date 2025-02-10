@@ -16,6 +16,8 @@ from .hyvideo.diffusion.schedulers.scheduling_dpmsolver_multistep import DPMSolv
 from .hyvideo.diffusion.schedulers.scheduling_sasolver import SASolverScheduler
 from. hyvideo.diffusion.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
 
+import execution_context
+
 scheduler_mapping = {
     "FlowMatchDiscreteScheduler": FlowMatchDiscreteScheduler,
     "SDE-DPMSolverMultistepScheduler": DPMSolverMultistepScheduler,
@@ -32,7 +34,7 @@ from accelerate import init_empty_weights
 from accelerate.utils import set_module_tensor_to_device
 
 import folder_paths
-folder_paths.add_model_folder_path("hyvid_embeds", os.path.join(folder_paths.get_output_directory(), "hyvid_embeds"))
+# folder_paths.add_model_folder_path("hyvid_embeds", os.path.join(folder_paths.get_output_directory(), "hyvid_embeds"))
 
 import comfy.model_management as mm
 from comfy.utils import load_torch_file, save_torch_file
@@ -116,16 +118,19 @@ class HyVideoLoraBlockEdit:
         return (selected_blocks,)
 class HyVideoLoraSelect:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(s, context: execution_context.ExecutionContext):
         return {
             "required": {
-               "lora": (folder_paths.get_filename_list("loras"),
+               "lora": (folder_paths.get_filename_list(context, "loras"),
                 {"tooltip": "LORA models are expected to be in ComfyUI/models/loras with .safetensors extension"}),
                 "strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.0001, "tooltip": "LORA strength, set to 0.0 to unmerge the LORA"}),
             },
             "optional": {
                 "prev_lora":("HYVIDLORA", {"default": None, "tooltip": "For loading multiple LoRAs"}),
                 "blocks":("SELECTEDBLOCKS", ),
+            },
+            "hidden": {
+                "context": "EXECUTION_CONTEXT",
             }
         }
 
@@ -135,11 +140,11 @@ class HyVideoLoraSelect:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "Select a LoRA model from ComfyUI/models/loras"
 
-    def getlorapath(self, lora, strength, blocks=None, prev_lora=None, fuse_lora=False):
+    def getlorapath(self, lora, strength, blocks=None, prev_lora=None, fuse_lora=False, context: execution_context.ExecutionContext=None):
         loras_list = []
 
         lora = {
-            "path": folder_paths.get_full_path("loras", lora),
+            "path": folder_paths.get_full_path(context, "loras", lora),
             "strength": strength,
             "name": lora.split(".")[0],
             "fuse_lora": fuse_lora,
@@ -275,10 +280,10 @@ class HyVideoModelConfig:
 #region Model loading
 class HyVideoModelLoader:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(s, context: execution_context.ExecutionContext):
         return {
             "required": {
-                "model": (folder_paths.get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
+                "model": (folder_paths.get_filename_list(context, "diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
 
             "base_precision": (["fp32", "bf16"], {"default": "bf16"}),
             "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'fp8_e5m2', 'fp8_scaled'], {"default": 'disabled', "tooltip": "optional quantization method"}),
@@ -297,6 +302,9 @@ class HyVideoModelLoader:
                 "lora": ("HYVIDLORA", {"default": None}),
                 "auto_cpu_offload": ("BOOLEAN", {"default": False, "tooltip": "Enable auto offloading for reduced VRAM usage, implementation from DiffSynth-Studio, slightly different from block swapping and uses even less VRAM, but can be slower as you can't define how much VRAM to use"}),
                 "upcast_rope": ("BOOLEAN", {"default": True, "tooltip": "Upcast RoPE to fp32 for better accuracy, this is the default behaviour, disabling can improve speed and reduce memory use slightly"}),
+            },
+            "hidden": {
+                "context": "EXECUTION_CONTEXT",
             }
         }
 
@@ -306,7 +314,8 @@ class HyVideoModelLoader:
     CATEGORY = "HunyuanVideoWrapper"
 
     def loadmodel(self, model, base_precision, load_device,  quantization,
-                  compile_args=None, attention_mode="sdpa", block_swap_args=None, lora=None, auto_cpu_offload=False, upcast_rope=True):
+                  compile_args=None, attention_mode="sdpa", block_swap_args=None, lora=None, auto_cpu_offload=False, upcast_rope=True,
+                  context: execution_context.ExecutionContext=None):
         transformer = None
         mm.unload_all_models()
         mm.soft_empty_cache()
@@ -324,7 +333,7 @@ class HyVideoModelLoader:
         
         base_dtype = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[base_precision]
 
-        model_path = folder_paths.get_full_path_or_raise("diffusion_models", model)
+        model_path = folder_paths.get_full_path_or_raise(context, "diffusion_models", model)
         sd = load_torch_file(model_path, device=transformer_load_device, safe_load=True)
 
         in_channels = sd["img_in.proj.weight"].shape[1]
@@ -401,8 +410,8 @@ class HyVideoModelLoader:
             dtype = base_dtype
         params_to_keep = {"norm", "bias", "time_in", "vector_in", "guidance_in", "txt_in", "img_in"}
         param_count = sum(1 for _ in transformer.named_parameters())
-        for name, param in tqdm(transformer.named_parameters(), 
-            desc=f"Loading transformer parameters to {transformer_load_device}", 
+        for name, param in tqdm(transformer.named_parameters(),
+            desc=f"Loading transformer parameters to {transformer_load_device}",
             total=param_count,
             leave=True):
             dtype_to_use = base_dtype if any(keyword in name for keyword in params_to_keep) else dtype
@@ -426,7 +435,7 @@ class HyVideoModelLoader:
                 lora_sd = standardize_lora_key_format(lora_sd)
                 if l["blocks"]:
                     lora_sd = filter_state_dict_by_blocks(lora_sd, l["blocks"])
-                
+
                 # patch in channels for keyframe LoRA
                 if "diffusion_model.img_in.proj.lora_A.weight" in lora_sd:
                     from .hyvideo.modules.embed_layers import PatchEmbed
@@ -500,16 +509,19 @@ class HyVideoModelLoader:
 
 class HyVideoVAELoader:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(s, context: execution_context.ExecutionContext):
         return {
             "required": {
-                "model_name": (folder_paths.get_filename_list("vae"), {"tooltip": "These models are loaded from 'ComfyUI/models/vae'"}),
+                "model_name": (folder_paths.get_filename_list(context, "vae"), {"tooltip": "These models are loaded from 'ComfyUI/models/vae'"}),
             },
             "optional": {
                 "precision": (["fp16", "fp32", "bf16"],
                     {"default": "bf16"}
                 ),
                 "compile_args":("COMPILEARGS", ),
+            },
+            "hidden": {
+                "context": "EXECUTION_CONTEXT",
             }
         }
 
@@ -519,7 +531,7 @@ class HyVideoVAELoader:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "Loads Hunyuan VAE model from 'ComfyUI/models/vae'"
 
-    def loadmodel(self, model_name, precision, compile_args=None):
+    def loadmodel(self, model_name, precision, compile_args=None, context: execution_context.ExecutionContext=None):
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -527,9 +539,9 @@ class HyVideoVAELoader:
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
         with open(os.path.join(script_directory, 'configs', 'hy_vae_config.json')) as f:
             vae_config = json.load(f)
-        model_path = folder_paths.get_full_path("vae", model_name)
+        model_path = folder_paths.get_full_path(context, "vae", model_name)
         vae_sd = load_torch_file(model_path, safe_load=True)
-        
+
         if not "decoder.conv_norm_out.weight" in vae_sd:
             raise ValueError("""
 Incompatible VAE model selected, the HunyuanVideoWrapper's VAE nodes require using the original VAE model: 'https://huggingface.co/Kijai/HunyuanVideo_comfy/blob/main/hunyuan_video_vae_bf16.safetensors'
@@ -594,7 +606,7 @@ class HyVideoTorchCompileSettings:
         return (compile_args, )
 
 #region TextEncode
-    
+
 class HyVideoTextEmbedBridge:
     @classmethod
     def INPUT_TYPES(s):
@@ -616,7 +628,7 @@ class HyVideoTextEmbedBridge:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "Acts as a bridge between the native ComfyUI conditioning and the HunyuanVideoWrapper embeds"
 
-    def convert(self, positive, cfg, start_percent, end_percent, batched_cfg, use_cfg_zero_star, negative=None): 
+    def convert(self, positive, cfg, start_percent, end_percent, batched_cfg, use_cfg_zero_star, negative=None):
         positive_cond = positive[0][0]
         positive_pooled = positive[0][1]["pooled_output"]
         positive_attention_mask = torch.ones(positive_cond.shape[1], dtype=torch.bool, device=positive_cond.device).unsqueeze(0)
@@ -656,6 +668,9 @@ class DownloadAndLoadHyVideoTextEncoder:
                 "hidden_state_skip_layer": ("INT", {"default": 2}),
                 "quantization": (['disabled', 'bnb_nf4', "fp8_e4m3fn"], {"default": 'disabled'}),
                 "load_device": (["main_device", "offload_device"], {"default": "offload_device"}),
+            },
+            "hidden": {
+                "context": "EXECUTION_CONTEXT",
             }
         }
 
@@ -665,7 +680,8 @@ class DownloadAndLoadHyVideoTextEncoder:
     CATEGORY = "HunyuanVideoWrapper"
     DESCRIPTION = "Loads Hunyuan text_encoder model from 'ComfyUI/models/LLM'"
 
-    def loadmodel(self, llm_model, clip_model, precision,  apply_final_norm=False, hidden_state_skip_layer=2, quantization="disabled", load_device="offload_device"):
+    def loadmodel(self, llm_model, clip_model, precision,  apply_final_norm=False, hidden_state_skip_layer=2, quantization="disabled", load_device="offload_device",
+                  context: execution_context.ExecutionContext = None):
         lm_type_mapping = {
             "Kijai/llava-llama-3-8b-text-encoder-tokenizer": "llm",
             "xtuner/llava-llama-3-8b-v1_1-transformers": "vlm",
@@ -805,7 +821,7 @@ class HyVideoTextEncode:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4", 
+    def process(self, text_encoders, prompt, force_offload=True, prompt_template="video", custom_prompt_template=None, clip_l=None, image_token_selection_expr="::4",
                 hyvid_cfg=None, image=None, image1=None, image2=None, clip_text_override=None, image_embed_interleave=2, model_to_offload=None):
         if clip_text_override is not None and len(clip_text_override) == 0:
             clip_text_override = None
@@ -861,10 +877,10 @@ class HyVideoTextEncode:
                 #pixel_values = clip_preprocess(image.to(device), size=336, crop=True).float() * 255
                 #print(pixel_values.min(), pixel_values.max())
 
-                text_inputs = text_encoder.text2tokens(prompt, 
+                text_inputs = text_encoder.text2tokens(prompt,
                                                     prompt_template=prompt_template_dict)
-                prompt_outputs = text_encoder.encode(text_inputs, 
-                                                    prompt_template=prompt_template_dict, 
+                prompt_outputs = text_encoder.encode(text_inputs,
+                                                    prompt_template=prompt_template_dict,
                                                     image_token_selection_expr=image_token_selection_expr,
                                                     semantic_images = [semantic_images.squeeze(0) * 255] if text_encoder.text_encoder_type == "vlm" else None,
                                                     image_embed_interleave=image_embed_interleave,
@@ -872,18 +888,18 @@ class HyVideoTextEncode:
                                                     data_type=prompt_template,
                                                     )
             else:
-                text_inputs = text_encoder.text2tokens(prompt, 
+                text_inputs = text_encoder.text2tokens(prompt,
                                                     prompt_template=prompt_template_dict,
                                                     image1=image1,
                                                     image2=image2,
                                                     clip_text_override=clip_text_override)
-                prompt_outputs = text_encoder.encode(text_inputs, 
-                                                    prompt_template=prompt_template_dict, 
+                prompt_outputs = text_encoder.encode(text_inputs,
+                                                    prompt_template=prompt_template_dict,
                                                     image_token_selection_expr=image_token_selection_expr,
                                                     semantic_images = None,
                                                     device=device
                                                     )
-                
+
             prompt_embeds = prompt_outputs.hidden_state
 
             attention_mask = prompt_outputs.attention_mask
@@ -927,15 +943,15 @@ class HyVideoTextEncode:
                         uncond_image = torch.zeros_like(semantic_images.squeeze(0))
 
                 negative_prompt_outputs = text_encoder.encode(
-                    uncond_input, 
-                    prompt_template=prompt_template_dict, 
+                    uncond_input,
+                    prompt_template=prompt_template_dict,
                     device=device,
                     image_token_selection_expr=image_token_selection_expr,
                     semantic_images = [uncond_image] if text_encoder.text_encoder_type == "vlm" else None,
                     image_embed_interleave=image_embed_interleave,
                     data_type=prompt_template,
                 )
-                
+
                 negative_prompt_embeds = negative_prompt_outputs.hidden_state
 
                 negative_attention_mask = negative_prompt_outputs.attention_mask
@@ -1109,14 +1125,15 @@ class HyVideoCFG:
 #region embeds
 class HyVideoTextEmbedsSave:
     def __init__(self):
-        self.output_dir = folder_paths.get_output_directory()
+        # self.output_dir = folder_paths.get_output_directory()
+        pass
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {
             "hyvid_embeds": ("HYVIDEMBEDS",),
             "filename_prefix": ("STRING", {"default": "hyvid_embeds/hyvid_embed"}),
             },
-            "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
+            "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO", "context": "EXECUTION_CONTEXT"},
         }
 
     RETURN_TYPES = ("STRING", )
@@ -1126,9 +1143,10 @@ class HyVideoTextEmbedsSave:
     DESCRIPTION = "Save the text embeds"
 
 
-    def save(self, hyvid_embeds, prompt, filename_prefix, extra_pnginfo=None):
+    def save(self, hyvid_embeds, prompt, filename_prefix, extra_pnginfo=None, context: execution_context.ExecutionContext = None):
         from comfy.cli_args import args
-        full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(filename_prefix, self.output_dir)
+        output_dir = folder_paths.get_output_directory(context.user_hash)
+        full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(filename_prefix, output_dir)
         file = f"{filename}_{counter:05}_.safetensors"
         file = os.path.join(full_output_folder, file)
 
@@ -1153,8 +1171,15 @@ class HyVideoTextEmbedsSave:
 
 class HyVideoTextEmbedsLoad:
     @classmethod
-    def INPUT_TYPES(s):
-        return {"required": {"embeds": (folder_paths.get_filename_list("hyvid_embeds"), {"tooltip": "The saved embeds to load from output/hyvid_embeds."})}}
+    def INPUT_TYPES(s, context: execution_context.ExecutionContext):
+        return {
+            "required": {
+                "embeds": (folder_paths.get_filename_list(context,  "hyvid_embeds"), {"tooltip": "The saved embeds to load from output/hyvid_embeds."})
+            },
+            "hidden": {
+                "context": "EXECUTION_CONTEXT"
+            },
+        }
 
     RETURN_TYPES = ("HYVIDEMBEDS", )
     RETURN_NAMES = ("hyvid_embeds",)
@@ -1163,8 +1188,8 @@ class HyVideoTextEmbedsLoad:
     DESCTIPTION = "Load the saved text embeds"
 
 
-    def load(self, embeds):
-        embed_path = folder_paths.get_full_path_or_raise("hyvid_embeds", embeds)
+    def load(self, embeds, context: execution_context.ExecutionContext=None):
+        embed_path = folder_paths.get_full_path_or_raise(context,  "hyvid_embeds", embeds)
         loaded_tensors = load_torch_file(embed_path, safe_load=True)
         # Reconstruct original dictionary with None for missing keys
         prompt_embeds_dict = {
@@ -1232,7 +1257,7 @@ class HyVideoLoopArgs:
 
     def process(self, **kwargs):
         return (kwargs,)
-    
+
 class HunyuanVideoFresca:
     @classmethod
     def INPUT_TYPES(s):
@@ -1273,7 +1298,7 @@ class HunyuanVideoSLG:
 
         slg_double_block_list = [int(x.strip()) for x in double_blocks.split(",")] if double_blocks else None
         slg_single_block_list = [int(x.strip()) for x in single_blocks.split(",")] if single_blocks else None
-       
+
         slg_args = {
             "double_blocks": slg_double_block_list,
             "single_blocks": slg_single_block_list,
@@ -1281,7 +1306,7 @@ class HunyuanVideoSLG:
             "end_percent": end_percent,
         }
         return (slg_args,)
-    
+
 #region Sampler
 class HyVideoSampler:
     @classmethod
@@ -1319,6 +1344,9 @@ class HyVideoSampler:
                 "fresca_args": ("FRESCA_ARGS", ),
                 "slg_args": ("SLGARGS", ),
                 "mask": ("MASK", ),
+            },
+            "hidden": {
+                "context": "EXECUTION_CONTEXT",
             }
         }
 
@@ -1329,7 +1357,8 @@ class HyVideoSampler:
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
                 samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, 
-                teacache_args=None, scheduler=None, image_cond_latents=None, neg_image_cond_latents=None, riflex_freq_index=0, i2v_mode="stability", loop_args=None, fresca_args=None, slg_args=None, mask=None):
+                teacache_args=None, scheduler=None, image_cond_latents=None, neg_image_cond_latents=None, riflex_freq_index=0, i2v_mode="stability", loop_args=None, fresca_args=None, slg_args=None, mask=None,
+                context: execution_context.ExecutionContext=None):
         model = model.model
 
         device = mm.get_torch_device()
@@ -1359,14 +1388,14 @@ class HyVideoSampler:
             cfg_end_percent = 1.0
             batched_cfg = False
             use_cfg_zero_star = False
-        
+
         if embedded_guidance_scale == 0.0:
             embedded_guidance_scale = None
 
         i2v_stability = False
         if i2v_mode == "stability":
             i2v_stability = True
-     
+
         generator = torch.Generator(device=torch.device("cpu")).manual_seed(seed)
 
         if width <= 0 or height <= 0 or num_frames <= 0:
@@ -1471,7 +1500,7 @@ class HyVideoSampler:
             mask = mask.unsqueeze(-1).unsqueeze(0)
             mask = rearrange(mask, "b t h w c -> b c t h w")
             print("mask shape", mask.shape)
-            
+
             mask_latents = torch.nn.functional.interpolate(mask, size=(mask_length, mask_height, mask_width))
             mask_latents = mask_latents.to(device)
 
@@ -1506,6 +1535,7 @@ class HyVideoSampler:
             riflex_freq_index = riflex_freq_index,
             i2v_stability = i2v_stability,
             loop_args = loop_args,
+            context=context,
         )
 
         print_memory(device)
@@ -1515,7 +1545,7 @@ class HyVideoSampler:
             pass
 
         if teacache_args is not None:
-        
+
             log.info(f"TeaCache skipped {transformer.teacache_skipped_steps_cond} cond steps")
             if transformer.teacache_skipped_steps_uncond > 0:
                 log.info(f"TeaCache skipped {transformer.teacache_skipped_steps_uncond} uncond steps")
@@ -1542,7 +1572,7 @@ class HyVideoDecode:
                     "spatial_tile_sample_min_size": ("INT", {"default": 256, "min": 32, "max": 2048, "step": 32, "tooltip": "Spatial tile minimum size in pixels, smaller values use less VRAM, may introduce more seams"}),
                     "auto_tile_size": ("BOOLEAN", {"default": True, "tooltip": "Automatically set tile size based on defaults, above settings are ignored"}),
                     },
-                
+
                 "optional": {
                     "skip_latents": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "tooltip": "Number of latents to skip from the start, can help with flashing"}),
                     "balance_brightness": ("BOOLEAN", {"default": False, "tooltip": "Attempt to balance brightness of the output frames"}),
@@ -1621,7 +1651,7 @@ class HyVideoDecode:
                     # Calculate target brightness (median of frame means)
                     frame_means = torch.tensor([frame.mean().item() for frame in out])
                     target_brightness = frame_means.median()
-                    
+
                     # Scale each frame to target brightness
                     for i in range(len(out)):
                         current_mean = out[i].mean().item()
@@ -1664,7 +1694,7 @@ class HyVideoEncodeKeyframes:
     FUNCTION = "encode"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def encode(self, vae, start_image, end_image, num_frames, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size, 
+    def encode(self, vae, start_image, end_image, num_frames, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size,
                spatial_tile_sample_min_size, noise_aug_strength=0.0, latent_strength=1.0, latent_dist="sample"):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -1693,11 +1723,11 @@ class HyVideoEncodeKeyframes:
 
         # latent_video_length = (num_frames - 1) // 4 + 1
         # print(image_1.shape, image_2.shape, latent_video_length)
-        
+
         video_frames = torch.zeros(1, image_1.shape[1], num_frames-2, image_1.shape[3], image_1.shape[4], device=image_1.device, dtype=image_1.dtype)
         print("video_frames", video_frames.shape)
         video_frames = torch.cat([image_1, video_frames, image_2], dim=2) * 2.0 - 1.0
-        
+
         if enable_vae_tiling:
             vae.enable_tiling()
         if latent_dist == "sample":
@@ -1711,7 +1741,7 @@ class HyVideoEncodeKeyframes:
         log.info(f"encoded latents shape {latents.shape}")
 
         return ({"samples": latents},)
-    
+
 class HyVideoEncode:
     @classmethod
     def INPUT_TYPES(s):
@@ -1735,7 +1765,7 @@ class HyVideoEncode:
     FUNCTION = "encode"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def encode(self, vae, image, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size, 
+    def encode(self, vae, image, enable_vae_tiling, temporal_tiling_sample_size, auto_tile_size,
                spatial_tile_sample_min_size, noise_aug_strength=0.0, latent_strength=1.0, latent_dist="sample"):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -1774,7 +1804,7 @@ class HyVideoEncode:
 
 
         return ({"samples": latents},)
-    
+
 class HyVideoGetClosestBucketSize:
     @classmethod
     def INPUT_TYPES(s):
@@ -1804,7 +1834,7 @@ class HyVideoGetClosestBucketSize:
         closest_size, closest_ratio = self.get_closest_ratio(H, W, aspect_ratios, crop_size_list)
         log.info(f"ImageResizeToBucket: Closest size = {closest_size}, closest ratio = {closest_ratio}")
         return (closest_size[1], closest_size[0],)
-    
+
     def generate_crop_size_list(self, base_size=256, patch_size=16, max_ratio=4.0):
         num_patches =  round((base_size / patch_size) ** 2)
         assert max_ratio >= 1.
@@ -1916,7 +1946,7 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoLatentPreview": HyVideoLatentPreview,
     "HyVideoLoraSelect": HyVideoLoraSelect,
     "HyVideoLoraBlockEdit": HyVideoLoraBlockEdit,
-    "HyVideoTextEmbedsSave": HyVideoTextEmbedsSave,
+    # "HyVideoTextEmbedsSave": HyVideoTextEmbedsSave,
     "HyVideoTextEmbedsLoad": HyVideoTextEmbedsLoad,
     "HyVideoContextOptions": HyVideoContextOptions,
     "HyVideoEnhanceAVideo": HyVideoEnhanceAVideo,
@@ -1946,7 +1976,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoLatentPreview": "HunyuanVideo Latent Preview",
     "HyVideoLoraSelect": "HunyuanVideo Lora Select",
     "HyVideoLoraBlockEdit": "HunyuanVideo Lora Block Edit",
-    "HyVideoTextEmbedsSave": "HunyuanVideo TextEmbeds Save",
+    # "HyVideoTextEmbedsSave": "HunyuanVideo TextEmbeds Save",
     "HyVideoTextEmbedsLoad": "HunyuanVideo TextEmbeds Load",
     "HyVideoContextOptions": "HunyuanVideo Context Options",
     "HyVideoEnhanceAVideo": "HunyuanVideo Enhance A Video",

@@ -709,7 +709,8 @@ class HunyuanVideoPipeline(DiffusionPipeline):
 
         # 8. Preview callback
         from latent_preview import prepare_callback
-        callback = prepare_callback(self.comfy_model, num_inference_steps)
+        context = kwargs.get("context", None)
+        callback = prepare_callback(context, self.comfy_model, num_inference_steps)
 
         #print(self.scheduler.sigmas)
 
