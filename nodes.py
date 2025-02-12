@@ -121,8 +121,8 @@ class HyVideoLoraSelect:
     def INPUT_TYPES(s, context: execution_context.ExecutionContext):
         return {
             "required": {
-               "lora": (folder_paths.get_filename_list(context, "loras"),
-                {"tooltip": "LORA models are expected to be in ComfyUI/models/loras with .safetensors extension"}),
+               "lora": (folder_paths.get_filename_list(context, "loras", model_base="HUNYUAN_VIDEO"),
+                {"tooltip": "Add LORAs to your favorite list in the model gallery to use them."}),
                 "strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.0001, "tooltip": "LORA strength, set to 0.0 to unmerge the LORA"}),
             },
             "optional": {

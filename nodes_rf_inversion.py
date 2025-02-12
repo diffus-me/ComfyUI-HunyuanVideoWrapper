@@ -9,6 +9,8 @@ import comfy.model_management as mm
 from .hyvideo.diffusion.pipelines.pipeline_hunyuan_video import get_rotary_pos_embed
 from .enhance_a_video.globals import enable_enhance, disable_enhance, set_enhance_weight
 
+import execution_context
+
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
 VAE_SCALING_FACTOR = 0.476986
@@ -82,7 +84,10 @@ class HyVideoInverseSampler:
             },
             "optional": {
                 "interpolation_curve": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "forceInput": True, "tooltip": "The strength of the inversed latents along time, in latent space"}),
-            }    
+            },
+            "hidden": {
+                "context": "EXECUTION_CONTEXT"
+            }
         }
 
     RETURN_TYPES = ("LATENT",)
@@ -90,7 +95,7 @@ class HyVideoInverseSampler:
     FUNCTION = "process"
     CATEGORY = "HunyuanVideoWrapper"
 
-    def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, samples, gamma, start_step, end_step, gamma_trend, force_offload, interpolation_curve=None):
+    def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, samples, gamma, start_step, end_step, gamma_trend, force_offload, interpolation_curve=None, context: execution_context.ExecutionContext=None):
         comfy_model_patcher = model
         model = model.model
         device = mm.get_torch_device()
@@ -198,7 +203,7 @@ class HyVideoInverseSampler:
         latents = latents.to(dtype)
 
         from latent_preview import prepare_callback
-        callback = prepare_callback(comfy_model_patcher, steps)
+        callback = prepare_callback(context, comfy_model_patcher, steps)
 
         from comfy.utils import ProgressBar
         from tqdm import tqdm
@@ -304,6 +309,9 @@ class HyVideoReSampler:
                 "interpolation_curve": ("FLOAT", {"forceInput": True, "tooltip": "The strength of the inversed latents along time, in latent space"}),
                 "feta_args": ("FETAARGS", ),
 
+            },
+            "hidden": {
+                "context": "EXECUTION_CONTEXT"
             }
         }
 
@@ -313,7 +321,8 @@ class HyVideoReSampler:
     CATEGORY = "HunyuanVideoWrapper"
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, 
-                samples, inversed_latents, force_offload, start_step, end_step, eta_base, eta_trend, interpolation_curve=None, feta_args=None):
+                samples, inversed_latents, force_offload, start_step, end_step, eta_base, eta_trend, interpolation_curve=None, feta_args=None,
+                context: execution_context.ExecutionContext=None):
         comfy_model_patcher = model
         model = model.model
         device = mm.get_torch_device()
@@ -388,7 +397,7 @@ class HyVideoReSampler:
         self._num_timesteps = len(timesteps)
 
         from latent_preview import prepare_callback
-        callback = prepare_callback(comfy_model_patcher, steps)
+        callback = prepare_callback(context, comfy_model_patcher, steps)
 
         if feta_args is not None:
             set_enhance_weight(feta_args["weight"])
@@ -512,7 +521,10 @@ class HyVideoPromptMixSampler:
             "optional": {
                 "interpolation_curve": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "forceInput": True, "tooltip": "The strength of the inversed latents along time, in latent space"}),
                 "feta_args": ("FETAARGS", ),
-            }                
+            }      ,
+            "hidden": {
+                "context": "EXECUTION_CONTEXT"
+            }
         }
 
     RETURN_TYPES = ("LATENT",)
@@ -522,7 +534,8 @@ class HyVideoPromptMixSampler:
     EXPERIMENTAL = True
 
     def process(self, model, width, height, num_frames, hyvid_embeds, hyvid_embeds_2, flow_shift, steps, embedded_guidance_scale, 
-                seed, force_offload, alpha, interpolation_curve=None, feta_args=None):
+                seed, force_offload, alpha, interpolation_curve=None, feta_args=None,
+                context: execution_context.ExecutionContext=None):
         comfy_model_patcher = model
         model = model.model
         device = mm.get_torch_device()
@@ -620,7 +633,7 @@ class HyVideoPromptMixSampler:
         self._num_timesteps = len(timesteps)
 
         from latent_preview import prepare_callback
-        callback = prepare_callback(comfy_model_patcher, steps)
+        callback = prepare_callback(context, comfy_model_patcher, steps)
 
         from comfy.utils import ProgressBar
         from tqdm import tqdm
